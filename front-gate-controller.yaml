@@ -1,0 +1,285 @@
+#version 1
+#uses a single exit relay to control gate with locking software
+#captures metrics from a victron mppt charge controller
+
+substitutions:
+  name: front-gate-controller-e32
+  friendly_name: "Front Gate Controller"
+
+##############
+
+esphome:
+  name: ${name}
+  name_add_mac_suffix: false
+  friendly_name: ${friendly_name}  
+
+esp32:
+  board: wt32-eth01 # esp-wrover-kit #WT32-ETH01
+  framework:
+    type: arduino
+
+logger:
+
+api:
+  encryption:
+    key: !secret esphome_api_password
+
+ota:
+  - platform: esphome
+    password: !secret esphome_ota_password
+
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+    timezone: America/Chicago
+
+ethernet:
+  type: LAN8720
+  mdc_pin: GPIO23
+  mdio_pin: GPIO18
+  clk_mode: GPIO0_IN
+  phy_addr: 1
+  power_pin: GPIO16
+   
+  manual_ip:
+    static_ip: 192.168.1.25
+    gateway: 192.168.1.1
+    subnet: 255.255.255.0
+
+web_server:
+  port: 80
+  version: 3
+  ota: true
+  auth: 
+    username: !secret web_server_username
+    password: !secret web_server_password
+  sorting_groups:
+    - id: sorting_group_gate_control
+      name: "Gate Control"
+      sorting_weight: -1
+
+
+external_components:
+  - source: github://KinDR007/VictronMPPT-ESPHOME@main
+
+
+#https://github.com/KinDR007/VictronMPPT-ESPHOME
+#On JST-PH
+#Connect rx_pin to Pin 3
+#Connect GND to Pin 1
+
+uart:
+  id: uart_1
+  #tx_pin: 10  # Not used! The communication is read-only
+  rx_pin: 2   
+  #rx_pin: GPIO20 # Pin 30 / RXD0
+  #tx_pin: GPIO21 # Pin 31 / TXD0
+  baud_rate: 19200
+  rx_buffer_size: 256
+
+victron:
+  id: victron0
+  uart_id: uart_1
+
+output:
+  - platform: gpio
+    pin: GPIO15
+    id: gate_output
+
+switch:
+  - platform: output
+    name: "Gate Relay"
+    id: gate_relay
+    output: gate_output
+    icon: "mdi:gate"
+    internal: true
+
+  - platform: template
+    name: "Keep Open"
+    id: lock_open
+    icon: "mdi:lock-open"
+    optimistic: true
+    web_server:
+      sorting_group_id: sorting_group_gate_control   
+    on_turn_on:
+      then:
+        - if:
+            condition:
+              - switch.is_off: gate_relay
+            then:
+              - switch.turn_on: gate_relay
+    on_turn_off:
+      then:
+        - if:
+            condition:
+              - switch.is_on: gate_relay
+            then:
+              - switch.turn_off: gate_relay
+
+button:
+  - platform: safe_mode
+    name: "(Safe Mode)"
+
+  - platform: template
+    name: "Open"
+    icon: "mdi:gate"
+    on_press:
+      then:
+        - if:
+            condition:
+              - switch.is_off: lock_open
+            then:
+              - switch.turn_on: gate_relay
+              - delay: 500ms
+              - switch.turn_off: gate_relay
+    web_server:
+      sorting_group_id: sorting_group_gate_control
+
+
+
+sensor:
+  - platform: uptime
+    name: Uptime
+    update_interval: 60s
+
+  - platform: victron
+    victron_id: victron0
+    panel_voltage:
+      name: "Panel voltage"
+      id: panel_voltage
+    panel_power:
+      name: "Panel power"
+      id: panel_power
+    battery_voltage:
+      name: "Battery Voltage"
+      id: battery_voltage
+    battery_current:
+      name: "Battery current"
+      id: battery_current
+    load_current:
+      name: "Load current"
+      id: load_current
+    state_of_charge:
+      name: "SOC"
+    battery_temperature:
+      name: "Batt Temperature"
+    instantaneous_power:
+      name: "Instantaneous Power"
+
+    last_full_charge:
+      name: "last_full_charge"
+    min_battery_voltage:
+      name: "min_battery_voltage"
+
+    error_code:
+      name: "Error code"
+    # warning_code:
+    #   name: "warning"
+    yield_total:
+      name: "yield total"
+    yield_today:
+      name: "yield today"
+    max_power_today:
+      name: "max power today"
+    yield_yesterday:
+      name: "yield yesterday"
+    max_power_yesterday:
+      name: "max power yesterday"
+
+  - platform: template
+    name: "Panel Current (Calculated)"
+    unit_of_measurement: "A"
+    accuracy_decimals: 2
+    lambda: |-
+      if (id(panel_voltage).state != 0) {
+        return id(panel_power).state / id(panel_voltage).state;
+      } else {
+        return 0;
+      }
+
+  - platform: template
+    name: "Battery Power (Calculated)"
+    unit_of_measurement: "W"
+    accuracy_decimals: 2
+    lambda: |-
+      return id(battery_voltage).state * id(battery_current).state;
+
+  - platform: template
+    name: "Load Power (Calculated)"
+    unit_of_measurement: "W"
+    accuracy_decimals: 2
+    lambda: |-
+      return id(battery_voltage).state * id(load_current).state;
+
+  - platform: template
+    name: "Battery % (total)"
+    id: batpercent
+    lambda: return id(battery_voltage).state;
+    accuracy_decimals: 0
+    unit_of_measurement: "%"
+    icon: mdi:battery-medium
+    filters:
+      - calibrate_linear:
+          method: exact
+          datapoints:
+            - 11.59 -> 0.0
+            - 11.63 -> 10.0
+            - 11.76 -> 20.0
+            - 11.87 -> 30.0
+            - 11.97 -> 40.0
+            - 12.07 -> 50.0
+            - 12.18 -> 60.0
+            - 12.29 -> 70.0
+            - 12.41 -> 80.0
+            - 12.53 -> 90.0
+            - 12.64 -> 100.0
+      - lambda: |-
+          if (x < 0) {
+            return 0;
+          } else if (x > 100) {
+            return 100;
+          } else {
+            return x;
+          }
+  - platform: template
+    name: "Battery % (50% DOD)"
+    id: batpercent50
+    lambda: return id(battery_voltage).state;
+    accuracy_decimals: 0
+    unit_of_measurement: "%"
+    icon: mdi:battery-medium
+    filters:
+      - calibrate_linear:
+          method: exact
+          datapoints:
+            - 11.59 -> 0.0
+            - 12.07 -> 10.0
+            - 12.18 -> 30.0
+            - 12.29 -> 50.0
+            - 12.41 -> 70.0
+            - 12.53 -> 90.0
+            - 12.64 -> 100.0
+      - lambda: |-
+          if (x < 0) {
+            return 0;
+          } else if (x > 100) {
+            return 100;
+          } else {
+            return x;
+          }
+
+text_sensor:
+  - platform: victron
+    victron_id: victron0
+    device_type:
+      name: "device type"
+    # firmware_version_24bit:
+    #   name: "firmware version"
+    serial_number:
+      name: "Serial Number"
+    # hardware_revision:
+    #   name: "hardware number"
+    error:
+      name: "Error"
+    charging_mode:
+      name: "Charging Mode"
